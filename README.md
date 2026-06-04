@@ -1,3 +1,5 @@
-# SNDS training
+# VTL Training
 
-Training equipment related to the SNDS in VTL.
+> 👋 WIP
+
+This repository contains training materials for VTL.
