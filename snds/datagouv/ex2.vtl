@@ -1,0 +1,218 @@
+/*
+Normalize input datasets.
+CSV files don't contain metadata.
+Default behaviour: 
+	- type: string
+	- role: measure
+We also sort, row and column, to keep only what we need.
+*/
+
+ER_PRS_F := snds.ER_PRS_F	[
+								calc
+									identifier BEN_NIR_PSA := BEN_NIR_PSA,
+									identifier BEN_RNG_GEM := BEN_RNG_GEM,
+									identifier FLX_DIS_DTD := FLX_DIS_DTD,
+									identifier FLX_TRT_DTD := FLX_TRT_DTD,
+									identifier FLX_EMT_TYP := FLX_EMT_TYP,
+									identifier FLX_EMT_NUM := FLX_EMT_NUM,
+									identifier FLX_EMT_ORD := FLX_EMT_ORD,
+									identifier ORG_CLE_NUM := ORG_CLE_NUM,
+									identifier DCT_ORD_NUM := DCT_ORD_NUM,
+									identifier PRS_ORD_NUM := PRS_ORD_NUM,
+									identifier REM_TYP_AFF := REM_TYP_AFF
+							]
+							[keep EXE_SOI_DTD]
+							[filter instr(EXE_SOI_DTD, "2023:") > 0];
+
+IR_BEN_R := snds.IR_BEN_R	[
+								calc
+									identifier BEN_NIR_PSA := BEN_NIR_PSA,
+									identifier BEN_RNG_GEM := BEN_RNG_GEM
+							]
+							[keep BEN_SEX_COD, BEN_IDT_ANO];
+
+ER_PHA_F := snds.ER_PHA_F	[
+								calc	
+									identifier FLX_DIS_DTD := FLX_DIS_DTD,
+									identifier FLX_TRT_DTD := FLX_TRT_DTD,
+									identifier FLX_EMT_TYP := FLX_EMT_TYP,
+									identifier FLX_EMT_NUM := FLX_EMT_NUM,
+									identifier FLX_EMT_ORD := FLX_EMT_ORD,
+									identifier ORG_CLE_NUM := ORG_CLE_NUM,
+									identifier DCT_ORD_NUM := DCT_ORD_NUM,
+									identifier PRS_ORD_NUM := PRS_ORD_NUM,
+									identifier REM_TYP_AFF := REM_TYP_AFF
+							]
+							[keep PHA_PRS_C13];
+
+IR_PHA_R := snds.IR_PHA_R	[calc identifier PHA_PRS_C13 := PHA_CIP_C13]
+							[keep PHA_ATC_C03]
+							[filter PHA_ATC_C03 = "A10"];
+
+/* Step 1: Investigation of medication use */
+
+/*
+Rebuild the dispensing pathway.
+
+The joins successively link:
+    - beneficiaries
+    - reimbursement claims
+    - dispensed products
+    - drug classifications
+
+The resulting dataset contains beneficiaries
+with at least one reimbursed antidiabetic drug.
+*/
+
+join1 := inner_join	(ER_PRS_F, IR_BEN_R using BEN_NIR_PSA, BEN_RNG_GEM);
+
+join2 := inner_join	(join1, ER_PHA_F 
+						using 	FLX_DIS_DTD, FLX_TRT_DTD, FLX_EMT_TYP, FLX_EMT_NUM,
+								FLX_EMT_ORD, ORG_CLE_NUM, DCT_ORD_NUM, PRS_ORD_NUM,
+								REM_TYP_AFF
+					)
+					[filter not(isnull(PHA_PRS_C13))]
+					[calc identifier PHA_PRS_C13 := PHA_PRS_C13];
+
+compil_conso := inner_join	(join2, IR_PHA_R using PHA_PRS_C13);
+
+/*
+Identify beneficiaries exposed to antidiabetic medication.
+
+A beneficiary may have multiple dispensations.
+We aggregate at beneficiary level and create a simple flag.
+*/
+
+BEN_MEDOC := compil_conso	[filter not(isnull(BEN_IDT_ANO))]
+							[aggr TOP_MEDOC := count() group by BEN_IDT_ANO]
+							[calc TOP_MEDOC := 1];
+
+/* Step 2: Searching for hospitalizations in PMSI */
+
+/*
+Search for diabetes-related hospital stays.
+
+We look for ICD-10 codes E10-E14:
+    - principal diagnosis (DP)
+    - related diagnosis (DR)
+    - associated diagnosis (DA)
+*/
+
+DP_DR_SEJ := snds.T_MCO23B	[keep ETA_NUM, rsa_num, DGN_PAL, DGN_REL]
+								[calc
+									identifier ETA_NUM := ETA_NUM,
+									identifier rsa_num := rsa_num,
+									TOP_MOTIF_PRN := 1
+								]
+								[filter 
+									substr(DGN_PAL, 1, 3) in { "E10","E11","E12","E13","E14" }
+									or
+									substr(DGN_REL, 1, 3) in { "E10","E11","E12","E13","E14" }
+								]
+								[keep TOP_MOTIF_PRN];
+
+/*
+Hospital stays where diabetes appears in DP or DR.
+
+TOP_MOTIF_PRN = 1 identifies stays primarily
+related to diabetes.
+*/
+
+DP_DR_UM := snds.T_MCO23UM [keep ETA_NUM, rsa_num, DGN_PAL, DGN_REL]
+								[calc
+									identifier ETA_NUM := ETA_NUM,
+									identifier rsa_num := rsa_num,
+									TOP_MOTIF_PRN := 0
+								]
+								[filter 
+									substr(DGN_PAL, 1, 3) in { "E10","E11","E12","E13","E14" }
+									or
+									substr(DGN_REL, 1, 3) in { "E10","E11","E12","E13","E14" }
+								]
+								[keep TOP_MOTIF_PRN];
+
+/*
+Associated diagnoses.
+
+These records help identify diabetes-related stays
+even when diabetes is not the main reason for admission.
+*/
+
+DAS := snds.T_MCO23D	[keep ETA_NUM, rsa_num, ASS_DGN]
+							[filter substr(ASS_DGN, 1, 3) in { "E10","E11","E12","E13","E14" }]
+							[calc
+								identifier ETA_NUM := ETA_NUM,
+								identifier rsa_num := rsa_num,
+								TOP_MOTIF_PRN := 0
+							]
+							[keep TOP_MOTIF_PRN];
+
+/*
+Combine all diagnosis sources into a single
+hospital identification table.
+*/
+
+TABLE_HOSPI := union(DP_DR_SEJ, DP_DR_UM, DAS);
+
+T_MCO23C := snds.T_MCO23C	[calc
+									identifier ETA_NUM := ETA_NUM,
+									identifier rsa_num := rsa_num
+								];
+
+/*
+Move from stay level to patient level.
+
+A patient is considered hospitalized with diabetes
+if at least one qualifying stay is found.
+*/
+
+PAT_DIAB_HOSP := inner_join(TABLE_HOSPI, T_MCO23C)
+							[aggr TOP_MOTIF_PRN := max(TOP_MOTIF_PRN) group by NIR_ANO_17];
+
+/*
+Reconnect PMSI patients with the DCIR beneficiary repository.
+
+Aggregation removes duplicate stays and keeps
+one record per beneficiary.
+*/
+
+BEN_HOSP_DIAG := inner_join(IR_BEN_R, PAT_DIAB_HOSP[rename NIR_ANO_17 to BEN_NIR_PSA] as t1 using BEN_NIR_PSA)
+							[aggr TOP_MOTIF_PRN := max(TOP_MOTIF_PRN) group by BEN_IDT_ANO]
+							[calc TOP_HOSPI := 1];
+
+/* Step 3: Merge outpatient and hospital results */
+
+/*
+Combine both identification strategies.
+
+The full join keeps beneficiaries identified:
+    - through medication only
+    - through hospitalization only
+    - through both sources
+*/
+
+BENEF_ALL := full_join(BEN_MEDOC, BEN_HOSP_DIAG)[rename BEN_IDT_ANO to UN_BENEF];
+
+/*
+Produce the requested indicators.
+
+The final table contains:
+    - total distinct patients
+    - patients with antidiabetic drugs only
+    - patients identified through medication and/or hospitalization
+    - patients with a principal diabetes hospitalization (DP/DR)
+*/
+
+work.RES_DIAB <- BENEF_ALL	[	calc 
+									identifier Label := "Nombre",
+									indic := 1,
+									med_seul := if TOP_MEDOC = 1 and isnull(TOP_HOSPI) then 1 else 0,
+									med_hospi := if TOP_MEDOC = 1 and not(isnull(TOP_HOSPI)) then 1 else 0
+							]
+							[	aggr 
+									nb_benef_tot := sum(indic),
+									nb_benef_med_seul := sum(med_seul),
+									nb_benef_med_hospi := sum(med_hospi),
+									nb_benef_hospi_dpdr := sum(nvl(TOP_MOTIF_PRN, 0))
+								group by Label
+							];

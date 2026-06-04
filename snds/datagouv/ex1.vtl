@@ -1,0 +1,97 @@
+/*
+Normalize input datasets.
+CSV files don't contain metadata.
+Default behaviour: 
+	- type: string
+	- role: measure
+We also sort, row and column, to keep only what we need.
+*/
+
+ER_PRS_F := snds.ER_PRS_F	[
+								calc
+									identifier BEN_NIR_PSA := BEN_NIR_PSA,
+									identifier BEN_RNG_GEM := BEN_RNG_GEM,
+									identifier FLX_DIS_DTD := FLX_DIS_DTD,
+									identifier FLX_TRT_DTD := FLX_TRT_DTD,
+									identifier FLX_EMT_TYP := FLX_EMT_TYP,
+									identifier FLX_EMT_NUM := FLX_EMT_NUM,
+									identifier FLX_EMT_ORD := FLX_EMT_ORD,
+									identifier ORG_CLE_NUM := ORG_CLE_NUM,
+									identifier DCT_ORD_NUM := DCT_ORD_NUM,
+									identifier PRS_ORD_NUM := PRS_ORD_NUM,
+									identifier REM_TYP_AFF := REM_TYP_AFF
+							]
+							[
+								keep EXE_SOI_DTD
+							]
+							[
+								// a bit ugly
+								filter instr(EXE_SOI_DTD, "2023:") > 0
+							];
+IR_BEN_R := snds.IR_BEN_R	[
+								calc
+									identifier BEN_NIR_PSA := BEN_NIR_PSA,
+									identifier BEN_RNG_GEM := BEN_RNG_GEM
+							]
+							[
+								keep BEN_SEX_COD, BEN_IDT_ANO
+							];
+
+ER_PHA_F := snds.ER_PHA_F	[
+								calc	
+									identifier FLX_DIS_DTD := FLX_DIS_DTD,
+									identifier FLX_TRT_DTD := FLX_TRT_DTD,
+									identifier FLX_EMT_TYP := FLX_EMT_TYP,
+									identifier FLX_EMT_NUM := FLX_EMT_NUM,
+									identifier FLX_EMT_ORD := FLX_EMT_ORD,
+									identifier ORG_CLE_NUM := ORG_CLE_NUM,
+									identifier DCT_ORD_NUM := DCT_ORD_NUM,
+									identifier PRS_ORD_NUM := PRS_ORD_NUM,
+									identifier REM_TYP_AFF := REM_TYP_AFF
+							]
+							[
+								keep PHA_PRS_C13
+							];
+
+
+IR_PHA_R := snds.IR_PHA_R	[
+								calc	
+									identifier PHA_PRS_C13 := PHA_CIP_C13
+							]
+							[ 
+								keep PHA_ATC_C03
+							]
+							[
+								filter PHA_ATC_C03 = "J01"
+							];
+
+// We merge the 4 datasets using the correct join keys
+
+join1 := inner_join	(ER_PRS_F, IR_BEN_R using BEN_NIR_PSA, BEN_RNG_GEM);
+join2 := inner_join	(join1, ER_PHA_F 
+						using 	FLX_DIS_DTD, FLX_TRT_DTD, FLX_EMT_TYP, FLX_EMT_NUM,
+								FLX_EMT_ORD, ORG_CLE_NUM, DCT_ORD_NUM, PRS_ORD_NUM,
+								REM_TYP_AFF
+					)
+					[filter not(isnull(PHA_PRS_C13))]
+					[calc identifier PHA_PRS_C13 := PHA_PRS_C13];
+join3 := inner_join	(join2, IR_PHA_R using PHA_PRS_C13);
+
+/* 
+Distinct is missing in VLT (it will be introduced in the 2.3 version)
+We need a hack:
+	- We need to count distinct BEN_IDT_ANO group by BEN_SEX_COD
+	- Grouping by BEN_SEX_COD and BEN_IDT_ANO enable to keep distinct BEN_IDT_ANO
+	  We can then count by BEN_SEX_COD
+*/
+
+join3_uniq := join3[
+  		aggr n := count() group by BEN_SEX_COD, BEN_IDT_ANO
+	];
+
+work.result <- join3_uniq	[
+  		aggr nb := count() group by BEN_SEX_COD
+	]
+	[filter BEN_SEX_COD in {"1", "2"}]
+	[rename BEN_SEX_COD to sex]
+	[calc sex_label := if sex = "1" then "Man" else "Woman"];
